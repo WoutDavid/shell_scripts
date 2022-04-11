@@ -4,7 +4,7 @@
 # So do not delete.
 
 # default monitor is eDP-1-1
-MONITOR=eDP-1-1
+MONITOR=eDP-1
 
 # function ActivateLaptop{
 #         echo "Defaulting to eDP-1-1"
@@ -15,22 +15,22 @@ MONITOR=eDP-1-1
 # functions to switch from LVDS1 to VGA and vice versa
 function ActivateHDMI {
     echo "Switching to HDMI-0"
-    xrandr --output HDMI-0 --auto --output eDP-1-1 --off
-    MONITOR=HDMI-0
+    xrandr --output DVI-I-2-2 --auto --primary --output DVI-I-1-1 --auto --right-of DVI-I-2-2 --output eDP-1 --off
+    MONITOR=DVI-I-2-2
 }
 
 function DeactivateHDMI {
-    echo "Switching to eDP-1-1"
-    xrandr --output HDMI-0 --off --output eDP-1-1 --auto
-    MONITOR=eDP-1-1
+    echo "Switching to eDP-1"
+    xrandr --output DVI-I-1-1 --off --output DVI-I-2-2 --off --output eDP-1 --auto
+    MONITOR=eDP-1
 }
 
 # functions to check if HDMI-0 is connected and in use
 function HDMIActive {
-    [ $MONITOR = "HDMI-0" ]
+    [ $MONITOR = "DVI-I-2-2" ]
 }
 function HDMIConnected {
-    ! xrandr | grep "^HDMI-0" | grep -q disconnected
+    ! xrandr | grep "^DVI-I-2-2" | grep -q disconnected
 }
 
 # actual script
