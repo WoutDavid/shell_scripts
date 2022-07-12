@@ -1,9 +1,0 @@
-#!/bin/bash
-
-var="test"
-if [ -z "$var" ];
-then 
-        echo "var is blank"; 
-else
-        echo "var is set to '$var'"; 
-fi

@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+
+kitty -e /home/david/.cargo/bin/ncspot & 
+kitty -e cava &
