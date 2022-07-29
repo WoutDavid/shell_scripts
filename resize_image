@@ -1,0 +1,10 @@
+#!/usr/bin/bash
+
+shopt -s extglob
+INPUT_FILE=$(ls -p ?(*.jpg|*.png|*.jpeg) | grep -v / | gum filter)
+
+RESOLUTION=$(gum choose --limit 1 3840x2160! 5120x1440! 1920x1080!)
+
+OUTPUT_DIR=$(ls -d */ | gum choose --limit 1)
+
+magick convert $INPUT_FILE -resize $RESOLUTION "./${OUTPUT_DIR}/resized_${INPUT_FILE}"
