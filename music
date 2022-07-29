@@ -2,3 +2,8 @@
 
 kitty -e /home/david/.cargo/bin/ncspot & 
 kitty -e cava &
+kitty -e bluetoothctl &
+bluetoothctl -- connect 38:18:4C:96:66:34
+
+
+

@@ -1,0 +1,9 @@
+#!/usr/bin/env sh
+
+git status --porcelain | sed s/^...// | gum choose --no-limit | xargs git add  
+
+git status
+
+gum confirm "Also commit?" && git_commit || git status
+
+
