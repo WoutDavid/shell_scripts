@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+
+import os
+import json
+import random
+import string
+import argparse
+
+ap = argparse.ArgumentParser(description="Adds a csv tab to a tissuumaps static session.")
+
+ap.add_argument('file',type=str,help="Path to csv file to be uploaded.")
+
+ap.add_argument('static',type=str,help="Path to static folder to upload in")
+
+ap.add_argument('-t', '--title', type=str, default="data", help="Name to give the button tab")
+
+ap.add_argument('-k', '--key', type=str, default="cluster", help="Key to cluster/visualize the data by")
+
+args = ap.parse_args()
+
+
+assert os.path.isdir(args.static)
+
+
+
+# Add return val to be able to parse the label csv with new coordinates
+def parseCellName(string, return_val = ""):
+    splitted = string.split("_")
+    col = int(re.findall('\d+', splitted[0])[0])
+    row = int(re.findall('\d+', splitted[1])[0])
+    label =int( splitted[2])
+    if not return_val:
+       return row, col, label
+    elif return_val == "row":
+       return row
+    elif return_val == "col":
+       return col
+
+def exportCoordinates(cluster_label_df, path_name, cluster_is_int):
+    # tmp function to map the rows and col values to new columns, it's disgusting
+   def parseDfRow(row, return_val):
+       return(parseCellName(row["cell_name"], return_val))
+   cluster_label_df["row"] = cluster_label_df.apply(lambda row: parseDfRow(row, "row"), axis=1)
+   cluster_label_df["col"] = cluster_label_df.apply(lambda row: parseDfRow(row, "col"), axis=1)
+
+   if not cluster_is_int:
+       cluster_label_df['cluster_nr'] = cluster_label_df['cluster'].map(cluster_mapping)
+
+   # cluster_label_df.to_csv(f"{os.path.splitext(path_name)[0]}_adapted.csv", index=None)
+   return cluster_label_df
+
+df = pd.read_csv(args.file)
+adapted_df = exportCoordinates(df)
+
+adapted_df.to_csv(os.path.join(arsg.static, "data/files/", adapted_df), index=False)
+
+with open(os.path.join(args.static, "project.tmap"), 'r') as f:
+    proj = json.load(f)
+
+markerfile_template = {'path': 'data/files/C1_non_cancer_clusters_res_0.3_adapted.csv', 'comment': '', 'title': 'Download data', 'hideSettings': True, 'autoLoad': False, 'uid': 'U9B167', 'name': 'New markers', 'expectedHeader': {'X': 'col', 'Y': 'row', 'gb_col': 'cluster', 'gb_name': 'null', 'cb_cmap': '', 'cb_col': 'null', 'cb_gr_dict': '', 'scale_col': 'null', 'scale_factor': '1', 'pie_col': 'null', 'pie_dict': '', 'shape_col': 'null', 'shape_fixed': 'cross', 'shape_gr_dict': '', 'opacity_col': 'null', 'opacity': '1', 'tooltip_fmt': ''}, 'expectedRadios': {'cb_col': False, 'cb_gr': True, 'cb_gr_rand': False, 'cb_gr_dict': False, 'cb_gr_key': True, 'pie_check': False, 'scale_check': False, 'shape_gr': True,'shape_gr_rand': True, 'shape_gr_dict': False, 'shape_col': False, 'shape_fixed': False, 'opacity_check': False, '_no_outline': False}, 'fromButton': 0}
+
+# base keys: dict_keys(['path', 'comment', 'title', 'hideSettings', 'autoLoad', 'uid', 'name', 'expectedHeader', 'expectedRadios', 'fromButton'])
+
+## to change: path, title, uid, name, expectedHeader:gb_col , fromButton
+
+markerfile_template['path'] = os.path.join("data/folder/", os.path.basename(args.file))
+markerfile_template['title'] = f"Download {args.title}"
+markerfile_template['uid'] = ''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(6))
+markerfile_template['name'] = args.title
+markerfile_template['expectedHeader']['gb_col'] = args.key
+markerfile_template['fromButton'] = len(proj['markerFiles'])
+
+proj["markerFiles"].append(markerfile_template)
+
+with open(os.path.join(args.static, "project.tmap"), 'w') as f:
+    json.dump(proj, f)
+
+
+
+
+
+
+
+
+
