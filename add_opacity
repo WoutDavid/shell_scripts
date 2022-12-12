@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+
+import pandas as pd
+import os
+import argparse
+
+ap = argparse.ArgumentParser(description="Adds opacity column to counts dataframe to use in tissuumaps")
+
+ap.add_argument('file',type=str,help="Path to counts csv file to add column to.")
+
+ap.add_argument('-genes', type=str, nargs='+')
+
+ap.add_argument('-o', type=float, nargs='+')
+
+args = ap.parse_args()
+
+assert len(args.genes) == len(args.o)
+
+df =  pd.read_csv(args.file)
+df["opacity"] = [1] * len(df)
+
+for opacity, gene in zip(args.o, args.genes):
+    df.loc[df.gene == gene,"opacity"] =  opacity
+
+print(df["opacity"].value_counts())
+df.to_csv(args.file)
+
