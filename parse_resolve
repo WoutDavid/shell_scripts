@@ -1,0 +1,16 @@
+#!/bin/bash
+
+FILES=$(find . -type f -name '*results.txt')
+
+for file in $FILES
+do
+    echo $file
+    # Replace all tabs with commas and remove the final column
+    cut -d$'\t' -f1-4 $file | tr '\t' ',' > temp.txt
+
+    # Add the column names
+    sed '1s/^/col,row,z,gene\n/' temp.txt > ${file%.txt}_modified.txt
+
+    # Remove the temporary file
+    rm temp.txt
+done
