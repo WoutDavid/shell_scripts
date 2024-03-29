@@ -9,3 +9,5 @@ python setup.py sdist
 
 python setup.py bdist_wheel --universal
 
+# AFter this, run twine upload --repository pyxelperfect dist/*0.1.9*
+# pypi config file is located here: $HOME/.pypirc

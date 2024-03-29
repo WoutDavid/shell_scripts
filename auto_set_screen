@@ -16,6 +16,7 @@ MONITOR=eDP-1
 function ActivateHDMI {
     echo "Switching to HDMI-0"
     xrandr --output DVI-I-2-2 --auto --primary --output DVI-I-1-1 --auto --right-of DVI-I-2-2 --output eDP-1 --off
+    xset r rate 200 70
     MONITOR=DVI-I-2-2
 }
 

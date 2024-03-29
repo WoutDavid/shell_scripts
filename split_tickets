@@ -1,0 +1,27 @@
+#!/bin/bash
+
+shopt -s extglob
+INPUT_FILE=$(ls -p ?(*.pdf) | grep -v / | gum filter)
+
+N_TICKETS=$(pdfinfo $INPUT_FILE | awk '/^Pages:/ {print $2}')
+
+declare -A names
+
+for index in $(seq 1 $N_TICKETS);
+do
+        echo "Name for ticket number $index"
+        name=$(gum input)
+        names[$index]=$name
+done
+
+stem=$(basename "$INPUT_FILE" .pdf)
+
+pdfseparate $INPUT_FILE  "${stem}_%d.pdf"
+
+for index in $(seq 1 $N_TICKETS);
+do
+        name="${names[$index]}"
+        mv "${stem}_$index.pdf" "${stem}_${name}.pdf"
+done
+
+
