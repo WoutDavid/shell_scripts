@@ -1,0 +1,8 @@
+#!/bin/bash
+
+OUTPUT="eDP-1"
+# INCREMENT=0.1
+
+# Apply new gamma values
+xrandr --output "$OUTPUT" --gamma $1:$1:$1
+

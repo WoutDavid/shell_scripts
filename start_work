@@ -1,7 +1,9 @@
 #!/bin/bash
 
-chromium https://toledo.kuleuven.be/ &
+chromium https://toledo.kuleuven.be/ --password-store=basic &
 
 keepassxc &
 
 slack &
+
+spotify &
