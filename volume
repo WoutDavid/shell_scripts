@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+#
+# volume -- the volume keys, pointed at whatever you can actually hear.
+#
+#   volume up       raise 5%, and unmute (raising a muted sink should make noise)
+#   volume down     lower 5%
+#   volume toggle   mute/unmute
+#   volume mute
+#   volume unmute
+#   volume status   print "NN%" or "mute" and exit
+#
+# Why this exists: the media keys used to run `amixer set Master`, which is raw
+# ALSA and -- via /etc/asound.conf's `defaults.ctl.card 1` -- always drove the
+# built-in codec's hardware mixer no matter what was actually playing. So the
+# keys silently did nothing whenever audio was on Bluetooth or the dock, and
+# the statusbar and the keys disagreed. Everything here goes through
+# PulseAudio's default sink instead, which is the one thing that moves when the
+# output moves. Same reasoning as the `volume` note in statusbar's header.
+#
+# pactl does not clamp, so `+5%` past 100 keeps climbing into software gain and
+# distorts. The step is computed and clamped here instead of handed to pactl as
+# a relative change. That flattens any per-channel balance, which is the right
+# trade for a volume key.
+#
+# KEEP IN SYNC: three things call this -- ~/.xbindkeysrc (the live bindings),
+# ~/suckless/dwm-6.2/config.h and ~/suckless/slock-1.7/config.h. All three call
+# it by absolute path, because slock runs with a minimal environment.
+
+set -u
+
+STEP=5
+SINK="@DEFAULT_SINK@"
+BAR="${HOME}/shell_scripts/statusbar"
+
+# The default sink's current volume as a bare integer, or nothing if it can't
+# be read. This server is 13.99, which has no `pactl get-sink-volume`, so the
+# name comes from `pactl info` and the percentage from the `/ NN% /` field --
+# not the dB value, which is locale-formatted ("-0,14 dB" here).
+# Matches `Volume:` but not `Base Volume:`, and takes the first channel, so it
+# works for mono sinks too (a headset in HSP mode is mono).
+cur_vol() {
+    local def
+    def=$(pactl info 2>/dev/null | awk -F': ' '/^Default Sink:/{print $2}')
+    [ -n "$def" ] || return 1
+    pactl list sinks 2>/dev/null | awk -v want="$def" '
+        /^Sink #/            { cur = 0 }
+        /^[ \t]*Name:/       { cur = ($2 == want) }
+        cur && /^[ \t]*Volume:/ {
+            if (match($0, /\/ *[0-9]+%/)) {
+                v = substr($0, RSTART, RLENGTH); gsub(/[^0-9]/, "", v)
+                print v; exit
+            }
+        }'
+}
+
+is_muted() {
+    local def
+    def=$(pactl info 2>/dev/null | awk -F': ' '/^Default Sink:/{print $2}')
+    [ -n "$def" ] || return 1
+    pactl list sinks 2>/dev/null | awk -v want="$def" '
+        /^Sink #/          { cur = 0 }
+        /^[ \t]*Name:/     { cur = ($2 == want) }
+        cur && /^[ \t]*Mute:/ { print $2; exit }' | grep -q '^yes$'
+}
+
+# Nudge the bar so it reacts to the keypress instead of waiting out the tick.
+# Exits non-zero when the bar isn't running; that must not fail the keybind.
+refresh_bar() { [ -x "$BAR" ] && "$BAR" refresh >/dev/null 2>&1; return 0; }
+
+step_to() {
+    local cur new
+    cur=$(cur_vol) || cur=""
+    if [ -z "$cur" ]; then
+        # No readable default sink (PulseAudio still starting, say). Fall back
+        # to a relative change so the key still does something.
+        pactl set-sink-volume "$SINK" "$1${STEP}%" 2>/dev/null
+        return
+    fi
+    new=$(( cur $1 STEP ))
+    [ "$new" -gt 100 ] && new=100
+    [ "$new" -lt 0 ] && new=0
+    pactl set-sink-volume "$SINK" "${new}%" 2>/dev/null
+}
+
+case "${1:-}" in
+    up)
+        pactl set-sink-mute "$SINK" 0 2>/dev/null
+        step_to +
+        ;;
+    down)
+        step_to -
+        ;;
+    toggle)
+        pactl set-sink-mute "$SINK" toggle 2>/dev/null
+        ;;
+    mute)
+        pactl set-sink-mute "$SINK" 1 2>/dev/null
+        ;;
+    unmute)
+        pactl set-sink-mute "$SINK" 0 2>/dev/null
+        ;;
+    status)
+        if is_muted; then echo "mute"; else echo "$(cur_vol)%"; fi
+        exit 0
+        ;;
+    *)
+        echo "usage: ${0##*/} up|down|toggle|mute|unmute|status" >&2
+        exit 2
+        ;;
+esac
+
+refresh_bar
+exit 0
