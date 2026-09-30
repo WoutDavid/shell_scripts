@@ -1,40 +1,279 @@
-#!/bin/bash
+#!/usr/bin/env bash
+#
+# battery_checking -- battery notifications for the dwm session.
+#
+# Replaces the old loop that shelled out to `acpi` three times every 20s and
+# re-sent "recharge" every 20s for as long as you stayed under 20%. This one
+# reads sysfs directly, warns once per threshold crossed, and escalates:
+#
+#   20%  low        normal urgency, times out
+#   10%  critical    critical urgency, stays on screen
+#    5%  last call   critical, tells you it will suspend
+#    3%  suspend     saves the session instead of losing it to a hard cutoff
+#
+# Warnings re-arm only once the battery climbs back over a threshold (or you
+# plug in), so a battery hovering at 19.6% doesn't nag.
+#
+# Usage:
+#   battery_checking            run the daemon (this is what ~/.xinitrc does)
+#   battery_checking status     one line for the dwm status bar
+#   battery_checking check      evaluate once and exit -- handy for testing
+#
+# Config, all overridable in ~/.config/battery_checking.conf:
+#   LOW=20 CRITICAL=10 LAST_CALL=5 SUSPEND_AT=3 SUSPEND=true
+#   FULL_NOTIFY=true PLUG_NOTIFY=true
+#
+# Log: ~/.cache/battery_checking.log
 
-SEND_FULL_NOTIFICATION=true
-SEND_RECHARGING_NOTIFICATION=true
-lower_bat_bound=20
+set -u
 
-while true
-do
-        if  acpi -b | grep -q "Full" && $SEND_FULL_NOTIFICATION; 
-        then
-                notify-send  "Battery full, you can unplug."
-                SEND_FULL_NOTIFICATION=false
-        elif acpi -b | grep -q "Discharging"
-        then
-                SEND_RECHARGING_NOTIFICATION=true
-                IFS='%'     # set ',' as general bash delimiter
-                BAT=$(acpi -b | awk '{ print $4 " " $5 }')
-                read -ra ADDR <<< "$BAT"   # str is read into an array as tokens separated by IFS, like str.split()
+LOW=20
+CRITICAL=10
+LAST_CALL=5
+SUSPEND_AT=3
+SUSPEND=true          # set false to only ever warn
+FULL_NOTIFY=true
+PLUG_NOTIFY=true
+HYSTERESIS=3          # % a threshold must be re-crossed by before it re-arms
+PS_DIR=${PS_DIR:-/sys/class/power_supply}   # overridable so the logic can be tested
 
-                # echo $ADDR
-                if [ "$ADDR" -lt "$lower_bat_bound" ] 2>/dev/null; 
-                then
-                          # echo "$ADDR is lower than $var"
-                          notify-send "Battery: $ADDR%, recharge"
-                fi
+CONF="$HOME/.config/battery_checking.conf"
+[ -r "$CONF" ] && . "$CONF"
 
-                IFS=' '     # reset ifs to default value after usage, because it's used in other processes as well
+LOG="$HOME/.cache/battery_checking.log"
+PIDFILE="$HOME/.cache/battery_checking.pid"
+export DISPLAY="${DISPLAY:-:0}"
 
-        elif acpi -b | grep -q "Charging" && $SEND_RECHARGING_NOTIFICATION;
-        then
-                SEND_FULL_NOTIFICATION=true
-                notify-send "Recharging"
-                SEND_RECHARGING_NOTIFICATION=false
+log() { echo "$(date '+%F %T') $*"; }
 
+# ── reading the battery ──────────────────────────────────────────────────────
+#
+# Sums every battery present, because "the laptop has one battery" is only true
+# until it isn't. Drivers report either charge_*/current_* (µAh/µA) or
+# energy_*/power_* (µWh/µW); both divide out to hours the same way, so whichever
+# pair exists is used. Sets: BAT_PCT, BAT_STATE, BAT_HOURS (empty if unknown).
+
+read_battery() {
+    local now=0 full=0 rate=0 dir="" s state="" have=0 v
+
+    BAT_PCT=""; BAT_STATE="Unknown"; BAT_HOURS=""
+
+    for dir in "$PS_DIR"/*/; do
+        [ "$(cat "$dir/type" 2>/dev/null)" = "Battery" ] || continue
+        [ "$(cat "$dir/present" 2>/dev/null || echo 1)" = "1" ] || continue
+        have=1
+
+        if [ -r "$dir/charge_now" ] && [ -r "$dir/charge_full" ]; then
+            now=$((now + $(cat "$dir/charge_now")))
+            full=$((full + $(cat "$dir/charge_full")))
+            v=$(cat "$dir/current_now" 2>/dev/null || echo 0)
+        elif [ -r "$dir/energy_now" ] && [ -r "$dir/energy_full" ]; then
+            now=$((now + $(cat "$dir/energy_now")))
+            full=$((full + $(cat "$dir/energy_full")))
+            v=$(cat "$dir/power_now" 2>/dev/null || echo 0)
         fi
-        sleep 20s 
+        rate=$((rate + ${v:-0}))
+
+        # Charging on any battery wins over Discharging: that's the pack the AC
+        # is feeding. Full only counts when nothing is doing anything else.
+        s=$(cat "$dir/status" 2>/dev/null || echo Unknown)
+        case "$s" in
+            Charging)     state=Charging ;;
+            Discharging)  [ "$state" = "Charging" ] || state=Discharging ;;
+            *)            [ -n "$state" ] || state=$s ;;
+        esac
+    done
+
+    [ "$have" = 1 ] || return 1
+    BAT_STATE=${state:-Unknown}
+
+    if [ "$full" -gt 0 ]; then
+        BAT_PCT=$(( now * 100 / full ))
+    else
+        # No capacity pair readable -- fall back to the driver's own percentage.
+        for dir in "$PS_DIR"/*/; do
+            [ -r "$dir/capacity" ] || continue
+            BAT_PCT=$(cat "$dir/capacity"); break
+        done
+    fi
+    [ -n "$BAT_PCT" ] || return 1
+    [ "$BAT_PCT" -gt 100 ] && BAT_PCT=100     # freshly calibrated packs overshoot
+
+    # Time left when discharging, time to full when charging.
+    if [ "$rate" -gt 0 ] && [ "$full" -gt 0 ]; then
+        case "$BAT_STATE" in
+            Discharging) BAT_HOURS=$(awk "BEGIN{printf \"%.2f\", $now/$rate}") ;;
+            Charging)    BAT_HOURS=$(awk "BEGIN{printf \"%.2f\", ($full-$now)/$rate}") ;;
+        esac
+    fi
+}
+
+hhmm() {   # 1.93 -> 1:55
+    [ -n "${1:-}" ] || return 0
+    awk "BEGIN{h=int($1); printf \"%d:%02d\", h, ($1-h)*60}"
+}
+
+on_ac() {
+    local dir
+    for dir in "$PS_DIR"/*/; do
+        case "$(cat "$dir/type" 2>/dev/null)" in Mains|USB) ;; *) continue ;; esac
+        [ "$(cat "$dir/online" 2>/dev/null)" = "1" ] && return 0
+    done
+    return 1
+}
+
+# ── notifying ────────────────────────────────────────────────────────────────
+#
+# The stack tag makes dunst replace the previous battery popup instead of piling
+# them up, so an escalation overwrites the warning it escalates from. Critical
+# notifications get timeout 0: at 8% you want it to stay until acknowledged.
+
+notify() {
+    local urgency=$1 timeout=$2 summary=$3 body=${4:-}
+    notify-send -a battery -u "$urgency" -t "$timeout" \
+        -h string:x-dunst-stack-tag:battery \
+        -h string:category:device \
+        "$summary" "$body" 2>/dev/null
+    log "notify [$urgency] $summary${body:+ -- $body}"
+}
+
+do_suspend() {
+    log "suspending at ${BAT_PCT}%"
+    notify critical 0 "Battery ${BAT_PCT}% -- suspending" "Plug in, then resume."
+    sleep 5                              # let the popup actually render
+    if command -v systemctl >/dev/null; then
+        systemctl suspend
+    else
+        loginctl suspend 2>/dev/null || log "no way to suspend found"
+    fi
+}
+
+# ── state evaluation ─────────────────────────────────────────────────────────
+#
+# One latch per threshold. Fires on the way down, re-arms when the battery gets
+# back above the threshold plus HYSTERESIS -- that gap is what stops a battery
+# sitting on the line from re-warning every poll.
+
+armed_low=1 armed_crit=1 armed_last=1
+armed_full=1 armed_plug=1
+prev_state=""
+
+evaluate() {
+    read_battery || { log "no battery found"; return; }
+
+    local t; t=$(hhmm "$BAT_HOURS")
+
+    if [ "$BAT_STATE" != "$prev_state" ]; then
+        log "state: ${prev_state:-none} -> $BAT_STATE (${BAT_PCT}%${t:+, $t})"
+        prev_state=$BAT_STATE
+    fi
+
+    case "$BAT_STATE" in
+        Discharging)
+            armed_plug=1
+            # Rising while discharging happens after a resume or a bad reading;
+            # either way it means the low-battery story has restarted.
+            [ "$BAT_PCT" -gt $((LOW + HYSTERESIS))       ] && armed_low=1
+            [ "$BAT_PCT" -gt $((CRITICAL + HYSTERESIS))  ] && armed_crit=1
+            [ "$BAT_PCT" -gt $((LAST_CALL + HYSTERESIS)) ] && armed_last=1
+
+            if [ "$BAT_PCT" -le "$SUSPEND_AT" ] && [ "$SUSPEND" = true ]; then
+                do_suspend
+            elif [ "$BAT_PCT" -le "$LAST_CALL" ] && [ "$armed_last" = 1 ]; then
+                armed_last=0; armed_crit=0; armed_low=0
+                notify critical 0 "Battery ${BAT_PCT}% -- last call" \
+                    "Suspending at ${SUSPEND_AT}%.${t:+ About $t left.}"
+            elif [ "$BAT_PCT" -le "$CRITICAL" ] && [ "$armed_crit" = 1 ]; then
+                armed_crit=0; armed_low=0
+                notify critical 0 "Battery ${BAT_PCT}% -- critical" \
+                    "Plug in now.${t:+ About $t left.}"
+            elif [ "$BAT_PCT" -le "$LOW" ] && [ "$armed_low" = 1 ]; then
+                armed_low=0
+                notify normal 10000 "Battery ${BAT_PCT}% -- low" \
+                    "${t:+About $t left.}"
+            fi
+            ;;
+
+        Charging)
+            armed_low=1; armed_crit=1; armed_last=1; armed_full=1
+            if [ "$armed_plug" = 1 ] && [ "$PLUG_NOTIFY" = true ]; then
+                armed_plug=0
+                notify low 5000 "Charging -- ${BAT_PCT}%" "${t:+Full in about $t.}"
+            fi
+            ;;
+
+        Full|"Not charging")
+            # "Not charging" is AC in with the charge controller holding off --
+            # a full battery for our purposes, not a problem to report.
+            armed_low=1; armed_crit=1; armed_last=1; armed_plug=1
+            if [ "$armed_full" = 1 ] && [ "$FULL_NOTIFY" = true ] && [ "$BAT_PCT" -ge 95 ]; then
+                armed_full=0
+                notify normal 10000 "Battery full (${BAT_PCT}%)" "You can unplug."
+            fi
+            ;;
+    esac
+}
+
+# ── status line ──────────────────────────────────────────────────────────────
+
+print_status() {
+    read_battery || { echo "Bat: n/a"; return; }
+    local sym t
+    t=$(hhmm "$BAT_HOURS")
+    case "$BAT_STATE" in
+        Charging)      sym="+" ;;
+        Discharging)   sym="-" ;;
+        Full)          sym="=" ;;
+        "Not charging") sym="=" ;;
+        *)             sym="?" ;;
+    esac
+    echo "Bat: ${BAT_PCT}%${sym}${t:+ $t}"
+}
+
+# ── entry points ─────────────────────────────────────────────────────────────
+
+case "${1:-daemon}" in
+    status) print_status; exit 0 ;;
+    check)  evaluate; print_status; exit 0 ;;
+    daemon) ;;
+    *) echo "usage: ${0##*/} [daemon|status|check]" >&2; exit 2 ;;
+esac
+
+mkdir -p "$(dirname "$LOG")"
+# Keep the log from growing without bound across years of sessions.
+[ -f "$LOG" ] && [ "$(stat -c %s "$LOG" 2>/dev/null || echo 0)" -gt 262144 ] && \
+    tail -n 500 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
+exec >>"$LOG" 2>&1
+
+# One per session. A pidfile rather than pkill -f, which would also match the
+# editor that happens to have this filename on its command line.
+if [ -r "$PIDFILE" ]; then
+    old=$(cat "$PIDFILE" 2>/dev/null)
+    if [ -n "${old:-}" ] && [ "$old" != "$$" ] && kill -0 "$old" 2>/dev/null; then
+        log "replacing running daemon (pid $old)"
+        kill "$old" 2>/dev/null
+        sleep 1
+    fi
+fi
+echo $$ > "$PIDFILE"
+trap 'rm -f "$PIDFILE"' EXIT
+
+log "=== start (pid $$) low=$LOW crit=$CRITICAL last=$LAST_CALL suspend=$SUSPEND@$SUSPEND_AT ==="
+
+# Poll rarely when there's nothing to say and often when there is: a battery at
+# 60% doesn't need looking at every 20 seconds, and one at 4% needs it more
+# often than that.
+while :; do
+    xset q >/dev/null 2>&1 || { log "X server gone, exiting"; exit 0; }
+
+    evaluate
+
+    interval=60
+    if [ "$BAT_STATE" = "Discharging" ] && [ -n "${BAT_PCT:-}" ]; then
+        if   [ "$BAT_PCT" -le $((LAST_CALL + 2)) ]; then interval=10
+        elif [ "$BAT_PCT" -le "$CRITICAL" ];       then interval=20
+        elif [ "$BAT_PCT" -le $((LOW + 10)) ];     then interval=30
+        fi
+    fi
+    sleep "$interval"
 done
-
-
-

@@ -1,8 +1,111 @@
 #!/bin/bash
+# brightness - interactive screen brightness slider
+# Uses hardware backlight when available, falls back to xrandr software brightness.
+# Requires: zenity (slider UI) or dmenu (fallback), xrandr
 
-OUTPUT="eDP-1"
-# INCREMENT=0.1
+BACKLIGHT_DIR=$(ls -d /sys/class/backlight/*/ 2>/dev/null | head -1)
 
-# Apply new gamma values
-xrandr --output "$OUTPUT" --gamma $1:$1:$1
+# ── helpers ──────────────────────────────────────────────────────────────────
 
+get_displays() {
+    xrandr --listmonitors | awk 'NR>1 { print $NF }'
+}
+
+xrandr_set() {
+    local pct=$1
+    local val
+    val=$(awk "BEGIN { printf \"%.2f\", $pct/100 }")
+    get_displays | while read -r disp; do
+        xrandr --output "$disp" --brightness "$val"
+    done
+}
+
+xrandr_get_pct() {
+    local disp
+    disp=$(get_displays | head -1)
+    local raw
+    raw=$(xrandr --verbose 2>/dev/null | awk "/^${disp} connected/{f=1} f && /Brightness:/{print \$2; exit}")
+    awk "BEGIN { printf \"%d\", (\"${raw:-1}\" + 0) * 100 }"
+}
+
+backlight_set() {
+    local pct=$1
+    local max cur
+    max=$(cat "${BACKLIGHT_DIR}max_brightness")
+    cur=$(awk "BEGIN { printf \"%d\", $pct/100 * $max }")
+    echo "$cur" > "${BACKLIGHT_DIR}brightness"
+}
+
+backlight_get_pct() {
+    local max actual
+    max=$(cat "${BACKLIGHT_DIR}max_brightness")
+    actual=$(cat "${BACKLIGHT_DIR}actual_brightness" 2>/dev/null || cat "${BACKLIGHT_DIR}brightness")
+    awk "BEGIN { printf \"%d\", $actual/$max * 100 }"
+}
+
+set_brightness() {
+    if [ -n "$BACKLIGHT_DIR" ]; then
+        backlight_set "$1"
+    else
+        xrandr_set "$1"
+    fi
+}
+
+# ── current level ─────────────────────────────────────────────────────────────
+
+if [ -n "$BACKLIGHT_DIR" ]; then
+    CURRENT=$(backlight_get_pct)
+else
+    CURRENT=$(xrandr_get_pct)
+fi
+CURRENT=${CURRENT:-100}
+
+# ── step mode (brightness up / brightness down) ───────────────────────────────
+
+STEP=5
+
+case "$1" in
+    up)
+        NEW=$(( CURRENT + STEP ))
+        [ "$NEW" -gt 100 ] && NEW=100
+        set_brightness "$NEW"
+        exit 0
+        ;;
+    down)
+        NEW=$(( CURRENT - STEP ))
+        [ "$NEW" -lt 1 ] && NEW=1
+        if [ "$NEW" -lt 5 ] && [ "$CURRENT" -ge 5 ]; then
+            zenity --question \
+                --title="Brightness warning" \
+                --text="Going below 5% — screen may become unreadable.\nContinue?" \
+                --default-cancel 2>/dev/null || exit 0
+        fi
+        set_brightness "$NEW"
+        exit 0
+        ;;
+esac
+
+# ── slider UI (no args) ───────────────────────────────────────────────────────
+
+if command -v zenity &>/dev/null; then
+    # --print-partial streams each value while dragging → live preview
+    zenity --scale \
+        --title="Brightness" \
+        --text="Screen Brightness" \
+        --min-value=1 \
+        --max-value=100 \
+        --value="$CURRENT" \
+        --step=5 \
+        --print-partial \
+        2>/dev/null | while read -r pct; do
+            set_brightness "$pct"
+        done
+else
+    # dmenu fallback — colors pulled from dwm config
+    VALUE=$(printf '%s\n' 5 10 20 30 40 50 60 70 80 90 100 | \
+        dmenu -p "Brightness %:" \
+              -fn "monospace:size=20" \
+              -nb "#222222" -nf "#bbbbbb" \
+              -sb "#ac8a8c" -sf "#eeeeee")
+    [ -n "$VALUE" ] && set_brightness "$VALUE"
+fi
